@@ -1,0 +1,157 @@
+#!/bin/bash
+
+# Header
+echo -e "\e[1;36m**********************************************\e[0m"
+echo -e "\e[1;36m*** PXE Boot Server Setup for Rocks OS HPC ***\e[0m"
+echo -e "\e[1;36m***   Created with ChatGPT's AI power!      ***\e[0m"
+echo -e "\e[1;36m**********************************************\e[0m\n"
+
+# Function for animated loading bar
+function ai_loading_bar() {
+    local steps=$1
+    local char="▓"
+    echo -ne "AI loading: "
+    for ((i = 0; i < steps; i++)); do
+        echo -ne "$char"
+        sleep 0.05
+    done
+    echo -ne "\n"
+}
+
+# Set up variables with prompts
+echo -e "\e[33mEnter the path to your Rocks OS ISO (leave blank to download):\e[0m"
+read -rp "ISO Path: " ROCKS_ISO_PATH
+
+echo -e "\e[33mEnter the IP address of this PXE server:\e[0m"
+read -rp "PXE Server IP: " PXE_SERVER_IP
+
+# Get the root password from the user and encrypt it
+echo -e "\e[33mEnter a root password for the Rocks OS installation:\e[0m"
+read -srp "Root Password: " ROOT_PASSWORD
+echo
+ENCRYPTED_PASSWORD=$(openssl passwd -6 "$ROOT_PASSWORD")
+
+# Detect system timezone
+TIMEZONE=$(timedatectl | grep "Time zone" | awk '{print $3}')
+echo -e "\e[32mDetected system timezone: $TIMEZONE\e[0m"
+
+# Check if ISO exists or needs download
+if [[ -z "$ROCKS_ISO_PATH" ]]; then
+    echo -e "\e[34mNo local ISO provided. Downloading Rocks OS base and HPC rolls from GitHub...\e[0m"
+    ROCKS_ISO_PATH="/tmp/rocks.iso"
+    ai_loading_bar 30
+    # Download Rocks OS rolls
+    curl -L -o $ROCKS_ISO_PATH https://github.com/rocksclusters/roll-server/releases/download/latest/rocks-base.iso
+    sleep 2
+    echo -e "\e[32mDownload complete!\e[0m"
+else
+    if [[ ! -f "$ROCKS_ISO_PATH" ]]; then
+        echo -e "\e[31mISO file not found. Move your ISO to $ROCKS_ISO_PATH or download instead.\e[0m"
+        echo "Press any key when ready..."
+        read -n 1 -s
+    else
+        echo -e "\e[32mFound ISO at $ROCKS_ISO_PATH.\e[0m"
+    fi
+fi
+
+# AI-inspired loading
+echo -e "\n\e[36mSetting up DHCP, TFTP, and HTTP servers... Powering up the AI circuits!\e[0m"
+ai_loading_bar 50
+
+# Install necessary packages
+echo -e "\e[33mInstalling DHCP, TFTP, and HTTP packages...\e[0m"
+yum install -y dhcp-server tftp-server httpd syslinux openssl > /dev/null 2>&1
+
+# DHCP configuration
+echo -e "\e[33mConfiguring DHCP server...\e[0m"
+cat <<EOF > /etc/dhcp/dhcpd.conf
+subnet 192.168.0.0 netmask 255.255.255.0 {
+    range 192.168.0.100 192.168.0.200;
+    option routers 192.168.0.1;
+    option subnet-mask 255.255.255.0;
+    option domain-name-servers 8.8.8.8;
+    filename "pxelinux.0";
+    next-server $PXE_SERVER_IP;
+}
+EOF
+
+systemctl start dhcpd && systemctl enable dhcpd
+echo -e "\e[32mDHCP configured and started!\e[0m"
+
+# TFTP configuration
+echo -e "\e[33mConfiguring TFTP server...\e[0m"
+cp /usr/share/syslinux/pxelinux.0 /var/lib/tftpboot/
+cat <<EOF > /etc/xinetd.d/tftp
+service tftp
+{
+    socket_type     = dgram
+    protocol        = udp
+    wait            = yes
+    user            = root
+    server          = /usr/sbin/in.tftpd
+    server_args     = -s /var/lib/tftpboot
+    disable         = no
+}
+EOF
+systemctl start xinetd && systemctl enable xinetd
+echo -e "\e[32mTFTP configured and started!\e[0m"
+
+# HTTP configuration and Rocks OS setup
+echo -e "\e[33mSetting up HTTP server for Rocks OS...\e[0m"
+mkdir -p /var/www/html/rocks
+mount -o loop $ROCKS_ISO_PATH /mnt
+cp -r /mnt/* /var/www/html/rocks/
+cat <<EOF > /var/www/html/ks.cfg
+# Sample Kickstart configuration file with encryption and timezone
+install
+url --url="http://$PXE_SERVER_IP/rocks"
+lang en_US.UTF-8
+keyboard us
+network --bootproto=dhcp
+rootpw --iscrypted $ENCRYPTED_PASSWORD
+firewall --disabled
+authconfig --enableshadow --passalgo=sha512
+selinux --disabled
+timezone $TIMEZONE --isUtc
+bootloader --location=mbr
+clearpart --all --initlabel
+autopart
+%packages
+@core
+%end
+EOF
+systemctl start httpd && systemctl enable httpd
+echo -e "\e[32mHTTP server configured and Rocks OS files are ready!\e[0m"
+
+# PXE boot menu configuration
+echo -e "\e[33mConfiguring PXE boot menu...\e[0m"
+mkdir -p /var/lib/tftpboot/pxelinux.cfg
+cat <<EOF > /var/lib/tftpboot/pxelinux.cfg/default
+DEFAULT rocks
+LABEL rocks
+    KERNEL rocks/vmlinuz
+    APPEND initrd=rocks/initrd.img ks=http://$PXE_SERVER_IP/ks.cfg
+EOF
+cp /var/www/html/rocks/images/pxeboot/vmlinuz /var/lib/tftpboot/rocks/
+cp /var/www/html/rocks/images/pxeboot/initrd.img /var/lib/tftpboot/rocks/
+echo -e "\e[32mPXE boot menu configured!\e[0m"
+
+# Basic hardening steps
+echo -e "\e[33mApplying basic hardening measures...\e[0m"
+# Disable root login over SSH
+sed -i 's/^#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+# Enforce key-based SSH authentication
+sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+systemctl restart sshd
+
+# Restrict HTTP server permissions
+chmod -R 755 /var/www/html/rocks
+chmod 600 /var/www/html/ks.cfg
+
+# Disable unneeded services
+systemctl disable cups avahi-daemon
+
+echo -e "\e[32mBasic hardening complete!\e[0m"
+
+# Completion message
+echo -e "\n\e[1;36mSetup Complete!\e[0m Your PXE boot server for Rocks OS is ready with basic security measures in place. Boot your HPC nodes via network to begin installation.\n"
